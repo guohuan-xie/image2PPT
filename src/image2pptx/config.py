@@ -22,7 +22,7 @@ class ShapeDetectionSettings(BaseModel):
 
 class SamSettings(BaseModel):
     model_path: str = "sam2_t.pt"
-    device: str = "cpu"
+    device: str = "auto"
     imgsz: int = 1024
     points_per_side: int = 32
     pred_iou_thresh: float = 0.88

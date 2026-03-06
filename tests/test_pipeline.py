@@ -11,7 +11,7 @@ from image2pptx.ocr import OcrBox, build_text_mask
 from image2pptx.pipeline import PipelineResult
 from image2pptx.pipeline import run_pipeline
 from image2pptx.preprocess import PreprocessResult
-from image2pptx.sam_segmenter import prepare_sam_input
+from image2pptx.sam_segmenter import prepare_sam_input, resolve_sam_device
 from image2pptx.scene_graph import BoundingBox
 from image2pptx.vectorize import build_scene_graph, build_scene_graph_from_components
 
@@ -259,3 +259,24 @@ def test_prepare_sam_input_inpaints_text_without_breaking_box_border() -> None:
     assert tuple(sam_input[8, 10, :3]) == (40, 40, 40)
     fill_delta = np.abs(sam_input[15, 30, :3].astype(int) - np.array([180, 220, 250]))
     assert int(fill_delta.max()) <= 35
+
+
+def test_resolve_sam_device_prefers_gpu_in_auto_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from image2pptx import sam_segmenter as sam_segmenter_module
+
+    monkeypatch.setattr(sam_segmenter_module, "cuda_is_available", lambda: True)
+    monkeypatch.setattr(sam_segmenter_module, "mps_is_available", lambda: False)
+
+    assert resolve_sam_device("auto") == "cuda:0"
+
+
+def test_resolve_sam_device_falls_back_to_cpu_when_cuda_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2pptx import sam_segmenter as sam_segmenter_module
+
+    monkeypatch.setattr(sam_segmenter_module, "cuda_is_available", lambda: False)
+    monkeypatch.setattr(sam_segmenter_module, "mps_is_available", lambda: False)
+
+    with pytest.warns(RuntimeWarning, match="Falling back to CPU"):
+        assert resolve_sam_device("cuda") == "cpu"
