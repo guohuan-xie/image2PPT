@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
 build/
 dist/
@@ -8,3 +10,11 @@ dist/
 venv/
 .env
 .env.*
+
+# Local debug outputs
+*_artifacts/
+
+# Local model weights
+sam_b.pt
+sam2_t.pt
+mobile_sam.pt
