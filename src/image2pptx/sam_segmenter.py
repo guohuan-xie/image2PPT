@@ -33,7 +33,7 @@ def segment_with_mobilesam(
         raise RuntimeError("ultralytics is required for segmentation_backend='sam'.")
 
     device = resolve_sam_device(settings.device)
-    sam_input = prepare_sam_input(rgba, text_mask)
+    sam_input = prepare_sam_input(rgba, text_mask, settings)
     if artifacts_dir is not None:
         Image.fromarray(sam_input, mode="RGBA").save(artifacts_dir / "sam_input.png")
 
@@ -77,20 +77,45 @@ def segment_with_mobilesam(
     return sam_input, components
 
 
-def prepare_sam_input(rgba: np.ndarray, text_mask: np.ndarray | None) -> np.ndarray:
+def prepare_sam_input(
+    rgba: np.ndarray,
+    text_mask: np.ndarray | None,
+    settings: SamSettings | None = None,
+) -> np.ndarray:
     sam_input = rgba.copy()
     if text_mask is None or not np.any(text_mask):
         return sam_input
 
-    inpaint_mask = (text_mask > 0).astype(np.uint8) * 255
+    effective_settings = settings or SamSettings()
+    inpaint_mask = build_sam_inpaint_mask(text_mask, effective_settings)
+    inpaint_radius = effective_settings.text_inpaint_radius
     inpainted_bgr = cv2.inpaint(
         cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2BGR),
         inpaint_mask,
-        inpaintRadius=3,
+        inpaintRadius=inpaint_radius,
         flags=cv2.INPAINT_TELEA,
+    )
+    inpainted_bgr = cv2.inpaint(
+        inpainted_bgr,
+        inpaint_mask,
+        inpaintRadius=max(3, inpaint_radius - 1),
+        flags=cv2.INPAINT_NS,
     )
     sam_input[:, :, :3] = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
     return sam_input
+
+
+def build_sam_inpaint_mask(text_mask: np.ndarray, settings: SamSettings) -> np.ndarray:
+    inpaint_mask = (text_mask > 0).astype(np.uint8)
+    if settings.text_inpaint_close_px > 0:
+        close_size = settings.text_inpaint_close_px * 2 + 1
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_size, close_size))
+        inpaint_mask = cv2.morphologyEx(inpaint_mask, cv2.MORPH_CLOSE, close_kernel)
+    if settings.text_inpaint_dilate_px > 0:
+        dilate_size = settings.text_inpaint_dilate_px * 2 + 1
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
+        inpaint_mask = cv2.dilate(inpaint_mask, dilate_kernel, iterations=1)
+    return inpaint_mask * 255
 
 
 def get_sam_model(model_path: str, device: str):

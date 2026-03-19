@@ -365,6 +365,32 @@ def test_build_text_nodes_rasterizes_dense_small_text_clusters(tmp_path: Path) -
     assert (tmp_path / "text_assets" / "text_cluster_0.png").exists()
 
 
+def test_build_text_nodes_skips_tiny_editable_text() -> None:
+    rgba = np.full((80, 120, 4), 255, dtype=np.uint8)
+    image = Image.fromarray(rgba, mode="RGBA")
+    preprocessed = PreprocessResult(
+        source_path=Path("synthetic.png"),
+        image=image,
+        rgba=rgba,
+        segmented_image=image,
+        segmented_rgba=rgba,
+        original_size=image.size,
+        processed_size=image.size,
+    )
+    settings = Image2PptxConfig().ocr
+    settings.min_editable_text_height_px = 20
+    box = OcrBox(
+        text="tiny",
+        score=0.99,
+        bbox=BoundingBox(x=10, y=10, width=30, height=14),
+        polygon=((10.0, 10.0), (40.0, 10.0), (40.0, 24.0), (10.0, 24.0)),
+    )
+
+    nodes = build_text_nodes(preprocessed, [box], settings)
+
+    assert nodes == []
+
+
 def test_prepare_sam_input_inpaints_text_without_breaking_box_border() -> None:
     rgba = np.full((40, 80, 4), 255, dtype=np.uint8)
     rgba[8:32, 10:70] = (180, 220, 250, 255)
