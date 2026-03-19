@@ -24,6 +24,7 @@ def postprocess_component_masks(
     raw_components: list[ComponentMask],
     settings: SamSettings,
     image_shape: tuple[int, int],
+    rgba: np.ndarray | None = None,
     text_mask: np.ndarray | None = None,
 ) -> list[ComponentMask]:
     image_height, image_width = image_shape
@@ -31,6 +32,18 @@ def postprocess_component_masks(
 
     filtered: list[ComponentMask] = []
     for component in raw_components:
+        repaired_mask = repair_component_mask(component.mask, component.bbox, settings, rgba)
+        repaired_bbox = bbox_from_mask(repaired_mask)
+        repaired_area = int(np.count_nonzero(repaired_mask))
+        if repaired_area == 0:
+            continue
+        component = ComponentMask(
+            id=component.id,
+            mask=repaired_mask,
+            bbox=repaired_bbox,
+            area=repaired_area,
+            score=component.score,
+        )
         if component.area < settings.min_mask_area_px:
             continue
         if component.area / image_area > settings.max_mask_area_ratio:
@@ -67,6 +80,31 @@ def postprocess_component_masks(
     merged = merge_adjacent_components(deduped, settings.merge_gap_px)
     merged.sort(key=lambda item: item.area, reverse=True)
     return merged[: settings.max_components]
+
+
+def repair_component_mask(
+    mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    settings: SamSettings,
+    rgba: np.ndarray | None = None,
+) -> np.ndarray:
+    repaired = mask.astype(np.uint8)
+
+    if settings.mask_close_px > 0:
+        kernel_size = settings.mask_close_px * 2 + 1
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        repaired = cv2.morphologyEx(repaired, cv2.MORPH_CLOSE, close_kernel)
+
+    if settings.mask_min_hole_area_px > 0:
+        repaired = fill_small_holes(repaired, settings.mask_min_hole_area_px)
+
+    if is_thin_bbox(bbox, settings):
+        repaired = bridge_thin_mask_gaps(repaired, bbox, settings)
+
+    if rgba is not None and settings.edge_expand_px > 0:
+        repaired = expand_mask_edges_by_color(repaired, bbox, rgba, settings)
+
+    return repaired > 0
 
 
 def merge_adjacent_components(components: list[ComponentMask], gap_px: int) -> list[ComponentMask]:
@@ -152,6 +190,92 @@ def is_thin_component_candidate(component: ComponentMask, settings: SamSettings)
         and max(width, height) >= settings.thin_component_min_length_px
         and aspect_ratio >= settings.thin_component_min_aspect_ratio
     )
+
+
+def is_thin_bbox(bbox: tuple[int, int, int, int], settings: SamSettings) -> bool:
+    width = max(1, bbox[2])
+    height = max(1, bbox[3])
+    aspect_ratio = max(width, height) / max(1, min(width, height))
+    return max(width, height) >= settings.thin_component_min_length_px and aspect_ratio >= settings.thin_component_min_aspect_ratio
+
+
+def fill_small_holes(mask: np.ndarray, max_hole_area_px: int) -> np.ndarray:
+    flood = (mask > 0).astype(np.uint8) * 255
+    height, width = flood.shape
+    floodfill_mask = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    cv2.floodFill(flood, floodfill_mask, (0, 0), 255)
+    background = (mask == 0).astype(np.uint8) * 255
+    holes = cv2.bitwise_not(flood) & background
+    if not np.any(holes):
+        return mask
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((holes > 0).astype(np.uint8), connectivity=8)
+    filled = (mask > 0).astype(np.uint8)
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area <= max_hole_area_px:
+            filled[labels == label] = 1
+    return filled
+
+
+def bridge_thin_mask_gaps(
+    mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    settings: SamSettings,
+) -> np.ndarray:
+    bridge = max(1, settings.thin_line_bridge_px)
+    width = max(1, bbox[2])
+    height = max(1, bbox[3])
+    horizontal = width >= height
+    if horizontal:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (bridge * 2 + 1, 1))
+    else:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, bridge * 2 + 1))
+    bridged = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    if settings.mask_close_px > 0:
+        fine_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        bridged = cv2.dilate(bridged, fine_kernel, iterations=1)
+    return bridged
+
+
+def expand_mask_edges_by_color(
+    mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    rgba: np.ndarray,
+    settings: SamSettings,
+) -> np.ndarray:
+    if not np.any(mask):
+        return mask
+
+    grow = max(1, settings.edge_expand_px)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow * 2 + 1, grow * 2 + 1))
+    dilated = cv2.dilate(mask, kernel, iterations=1)
+    ring = (dilated > 0) & (mask == 0)
+    if not np.any(ring):
+        return mask
+
+    foreground_pixels = rgba[mask > 0]
+    if len(foreground_pixels) == 0:
+        return mask
+    foreground_rgb = foreground_pixels[:, :3].astype(np.float32)
+    median_color = np.median(foreground_rgb, axis=0)
+
+    x, y, width, height = bbox
+    bbox_region = np.zeros(mask.shape, dtype=bool)
+    bbox_region[max(0, y - grow) : min(mask.shape[0], y + height + grow), max(0, x - grow) : min(mask.shape[1], x + width + grow)] = True
+
+    ring &= bbox_region & (rgba[:, :, 3] > 0)
+    if not np.any(ring):
+        return mask
+
+    ring_rgb = rgba[:, :, :3].astype(np.float32)
+    color_distance = np.linalg.norm(ring_rgb - median_color[None, None, :], axis=2)
+    expansion = ring & (color_distance <= settings.edge_color_distance_thresh)
+    expanded = (mask > 0) | expansion
+
+    if np.count_nonzero(expanded) > int(np.count_nonzero(mask) * settings.edge_expand_max_area_ratio):
+        return mask
+    return expanded.astype(np.uint8)
 
 
 def save_sam_debug_artifacts(

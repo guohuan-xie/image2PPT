@@ -12,7 +12,9 @@ MSO_SEGMENT_LINE = 0
 MSO_SHAPE_RECTANGLE = 1
 MSO_SHAPE_OVAL = 9
 PP_LAYOUT_BLANK = 12
+PP_ALIGN_LEFT = 1
 PP_ALIGN_CENTER = 2
+PP_ALIGN_RIGHT = 3
 
 try:
     import win32com.client  # type: ignore[import-not-found]
@@ -93,10 +95,16 @@ class PowerPointComExporter:
             shape.Line.Visible = False
             if node.text:
                 shape.TextFrame.TextRange.Text = node.text
-                shape.TextFrame.TextRange.ParagraphFormat.Alignment = PP_ALIGN_CENTER
+                shape.TextFrame.WordWrap = not node.single_line
+                shape.TextFrame.MarginLeft = 2
+                shape.TextFrame.MarginRight = 2
+                shape.TextFrame.MarginTop = 1
+                shape.TextFrame.MarginBottom = 1
+                shape.TextFrame.TextRange.ParagraphFormat.Alignment = self._paragraph_alignment(node.text_align)
                 font = shape.TextFrame.TextRange.Font
                 font.Name = "Microsoft YaHei"
-                font.Size = max(8.0, (node.font_size or node.bbox.height) * points_per_pixel)
+                font.Bold = -1 if node.bold else 0
+                font.Size = self._fit_font_size(node, points_per_pixel)
                 color = node.text_color or (0, 0, 0, 255)
                 font.Color.RGB = color[0] + (color[1] << 8) + (color[2] << 16)
             return
@@ -184,3 +192,20 @@ class PowerPointComExporter:
         shape.Line.Visible = True
         shape.Line.ForeColor.RGB = color[0] + (color[1] << 8) + (color[2] << 16)
         shape.Line.Weight = max(0.25, width_points)
+
+    def _paragraph_alignment(self, text_align: str) -> int:
+        if text_align == "center":
+            return PP_ALIGN_CENTER
+        if text_align == "right":
+            return PP_ALIGN_RIGHT
+        return PP_ALIGN_LEFT
+
+    def _fit_font_size(self, node: PrimitiveNode, points_per_pixel: float) -> float:
+        base_size = max(8.0, (node.font_size or node.bbox.height) * points_per_pixel)
+        if not node.text or not node.single_line:
+            return base_size
+
+        usable_width_pt = max(18.0, (node.bbox.width * points_per_pixel) - 4.0)
+        approx_char_width_em = 0.56 if all(ord(char) < 128 for char in node.text) else 0.9
+        width_limited_size = usable_width_pt / max(1.0, len(node.text) * approx_char_width_em)
+        return max(8.0, min(base_size, width_limited_size))

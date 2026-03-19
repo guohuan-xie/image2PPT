@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 Color = tuple[int, int, int, int]
 NodeKind = Literal["primitive", "freeform", "svg_asset", "picture_asset", "group"]
 PrimitiveType = Literal["rect", "circle", "line", "text"]
+TextAlign = Literal["left", "center", "right"]
 
 
 class Point(BaseModel):
@@ -39,6 +40,9 @@ class PrimitiveNode(BaseNode):
     text: str | None = None
     text_color: Color | None = None
     font_size: float | None = None
+    text_align: TextAlign = "left"
+    bold: bool = False
+    single_line: bool = False
     start: Point | None = None
     end: Point | None = None
 

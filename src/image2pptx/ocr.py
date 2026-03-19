@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from .config import OcrSettings
 from .preprocess import PreprocessResult
-from .scene_graph import BoundingBox, PrimitiveNode
+from .scene_graph import BoundingBox, Node, PictureAssetNode, PrimitiveNode
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -73,14 +75,27 @@ def detect_text_boxes(preprocessed: PreprocessResult, settings: OcrSettings) -> 
     return boxes
 
 
-def build_text_nodes(preprocessed: PreprocessResult, boxes: list[OcrBox]) -> list[PrimitiveNode]:
-    nodes: list[PrimitiveNode] = []
+def build_text_nodes(
+    preprocessed: PreprocessResult,
+    boxes: list[OcrBox],
+    settings: OcrSettings,
+    artifacts_dir: Path | None = None,
+) -> list[Node]:
+    excluded_indexes: set[int] = set()
+    nodes: list[Node] = []
+    if settings.rasterize_dense_text and artifacts_dir is not None:
+        dense_nodes, excluded_indexes = build_dense_text_picture_nodes(preprocessed, boxes, settings, artifacts_dir)
+        nodes.extend(dense_nodes)
+
+    text_node_index = 0
     for index, box in enumerate(boxes):
+        if index in excluded_indexes:
+            continue
         text_color = estimate_text_color(preprocessed.rgba, box.bbox)
-        font_size = max(8.0, box.bbox.height * 0.7)
+        font_size = estimate_font_size(box)
         nodes.append(
             PrimitiveNode(
-                id=f"text-{index}",
+                id=f"text-{text_node_index}",
                 primitive_type="text",
                 bbox=box.bbox,
                 z_index=0,
@@ -89,9 +104,64 @@ def build_text_nodes(preprocessed: PreprocessResult, boxes: list[OcrBox]) -> lis
                 text=box.text,
                 text_color=text_color,
                 font_size=font_size,
+                text_align=infer_text_alignment(box, preprocessed.processed_size[0]),
+                bold=box.bbox.height >= settings.heading_text_height_px,
+                single_line=should_render_as_single_line(box),
             )
         )
+        text_node_index += 1
     return nodes
+
+
+def build_dense_text_picture_nodes(
+    preprocessed: PreprocessResult,
+    boxes: list[OcrBox],
+    settings: OcrSettings,
+    artifacts_dir: Path,
+) -> tuple[list[PictureAssetNode], set[int]]:
+    candidate_indexes = [
+        index for index, box in enumerate(boxes) if box.bbox.height <= settings.rasterize_text_height_px
+    ]
+    if not candidate_indexes:
+        return [], set()
+
+    clusters = cluster_text_boxes(boxes, candidate_indexes, settings.rasterize_cluster_gap_px)
+    text_asset_dir = artifacts_dir / "text_assets"
+    nodes: list[PictureAssetNode] = []
+    excluded_indexes: set[int] = set()
+
+    for cluster_index, cluster in enumerate(clusters):
+        if len(cluster) < settings.rasterize_cluster_min_boxes:
+            continue
+
+        cluster_boxes = [boxes[index] for index in cluster]
+        cluster_bbox = union_bounding_boxes(
+            [box.bbox for box in cluster_boxes],
+            width=preprocessed.rgba.shape[1],
+            height=preprocessed.rgba.shape[0],
+            padding=settings.rasterize_cluster_padding_px,
+        )
+        mask = build_text_mask(preprocessed.rgba, cluster_boxes, settings)
+        crop = crop_masked_region(preprocessed.rgba, mask, cluster_bbox)
+        if crop is None:
+            continue
+
+        text_asset_dir.mkdir(parents=True, exist_ok=True)
+        image_path = text_asset_dir / f"text_cluster_{cluster_index}.png"
+        Image.fromarray(crop, mode="RGBA").save(image_path)
+        nodes.append(
+            PictureAssetNode(
+                id=f"text-cluster-{cluster_index}",
+                bbox=cluster_bbox,
+                z_index=0,
+                fill_color=None,
+                image_path=str(image_path),
+                source_region_id=None,
+            )
+        )
+        excluded_indexes.update(cluster)
+
+    return nodes, excluded_indexes
 
 
 def build_text_mask(rgba: np.ndarray, boxes: list[OcrBox], settings: OcrSettings) -> np.ndarray:
@@ -123,6 +193,87 @@ def estimate_text_color(rgba: np.ndarray, bbox: BoundingBox) -> tuple[int, int, 
         darkest = pixels
     color = np.median(darkest, axis=0).astype(int)
     return (int(color[0]), int(color[1]), int(color[2]), 255)
+
+
+def estimate_font_size(box: OcrBox) -> float:
+    return max(8.0, box.bbox.height * 0.72)
+
+
+def infer_text_alignment(box: OcrBox, canvas_width: int) -> str:
+    center_x = box.bbox.x + (box.bbox.width / 2.0)
+    if box.bbox.width >= canvas_width * 0.32 and abs(center_x - (canvas_width / 2.0)) <= canvas_width * 0.12:
+        return "center"
+    if box.bbox.x >= canvas_width * 0.72 and box.bbox.width <= canvas_width * 0.2:
+        return "right"
+    return "left"
+
+
+def should_render_as_single_line(box: OcrBox) -> bool:
+    return "\n" not in box.text and box.bbox.width >= box.bbox.height * 3.0
+
+
+def cluster_text_boxes(boxes: list[OcrBox], candidate_indexes: list[int], gap_px: int) -> list[list[int]]:
+    clusters: list[list[int]] = []
+    visited: set[int] = set()
+
+    for start in candidate_indexes:
+        if start in visited:
+            continue
+        queue = [start]
+        cluster: list[int] = []
+        visited.add(start)
+
+        while queue:
+            current = queue.pop()
+            cluster.append(current)
+            for other in candidate_indexes:
+                if other in visited:
+                    continue
+                if expanded_boxes_intersect(boxes[current].bbox, boxes[other].bbox, gap_px):
+                    visited.add(other)
+                    queue.append(other)
+
+        clusters.append(sorted(cluster))
+
+    return clusters
+
+
+def expanded_boxes_intersect(first: BoundingBox, second: BoundingBox, gap_px: int) -> bool:
+    return not (
+        first.x + first.width + gap_px < second.x
+        or second.x + second.width + gap_px < first.x
+        or first.y + first.height + gap_px < second.y
+        or second.y + second.height + gap_px < first.y
+    )
+
+
+def union_bounding_boxes(
+    boxes: list[BoundingBox],
+    width: int,
+    height: int,
+    padding: int,
+) -> BoundingBox:
+    x1 = max(0.0, min(box.x for box in boxes) - padding)
+    y1 = max(0.0, min(box.y for box in boxes) - padding)
+    x2 = min(float(width), max(box.x + box.width for box in boxes) + padding)
+    y2 = min(float(height), max(box.y + box.height for box in boxes) + padding)
+    return BoundingBox(x=x1, y=y1, width=x2 - x1, height=y2 - y1)
+
+
+def crop_masked_region(rgba: np.ndarray, mask: np.ndarray, bbox: BoundingBox) -> np.ndarray | None:
+    x1 = max(0, int(np.floor(bbox.x)))
+    y1 = max(0, int(np.floor(bbox.y)))
+    x2 = min(rgba.shape[1], int(np.ceil(bbox.x + bbox.width)))
+    y2 = min(rgba.shape[0], int(np.ceil(bbox.y + bbox.height)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = rgba[y1:y2, x1:x2].copy()
+    local_mask = mask[y1:y2, x1:x2] > 0
+    if not np.any(local_mask):
+        return None
+    crop[:, :, 3] = np.where(local_mask, crop[:, :, 3], 0)
+    return crop
 
 
 def refine_text_mask(rgba: np.ndarray, box: OcrBox, settings: OcrSettings) -> np.ndarray | None:

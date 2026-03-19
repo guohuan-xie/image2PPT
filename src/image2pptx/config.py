@@ -39,6 +39,12 @@ class SamSettings(BaseModel):
     thin_component_min_area_px: int = 60
     merge_gap_px: int = 0
     max_components: int = 96
+    mask_close_px: int = 1
+    mask_min_hole_area_px: int = 48
+    thin_line_bridge_px: int = 3
+    edge_expand_px: int = 2
+    edge_color_distance_thresh: float = 32.0
+    edge_expand_max_area_ratio: float = 1.6
 
 
 class VectorizationSettings(BaseModel):
@@ -68,6 +74,12 @@ class OcrSettings(BaseModel):
     text_mask_min_color_distance: float = 28.0
     text_mask_min_luminance_delta: float = 20.0
     text_mask_dilate_px: int = 1
+    rasterize_dense_text: bool = True
+    rasterize_text_height_px: int = 22
+    rasterize_cluster_gap_px: int = 18
+    rasterize_cluster_padding_px: int = 6
+    rasterize_cluster_min_boxes: int = 4
+    heading_text_height_px: int = 28
 
 
 class ExportSettings(BaseModel):

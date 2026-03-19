@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 from image2pptx.config import Image2PptxConfig
 from image2pptx.detection import detect_regions
 from image2pptx.mask_postprocess import ComponentMask, postprocess_component_masks
-from image2pptx.ocr import OcrBox, build_text_mask
+from image2pptx.ocr import OcrBox, build_text_mask, build_text_nodes
 from image2pptx.pipeline import PipelineResult
 from image2pptx.pipeline import run_pipeline
 from image2pptx.preprocess import PreprocessResult
@@ -204,9 +204,75 @@ def test_postprocess_component_masks_keeps_thin_arrow_like_masks() -> None:
         raw_components=[component],
         settings=settings,
         image_shape=mask.shape,
+        rgba=np.dstack([mask.astype(np.uint8) * 255] * 3 + [np.full(mask.shape, 255, dtype=np.uint8)]),
     )
 
     assert [item.id for item in components] == ["thin-arrow"]
+
+
+def test_postprocess_component_masks_bridges_thin_line_gaps() -> None:
+    config = Image2PptxConfig()
+    settings = config.sam
+    settings.min_mask_area_px = 20
+    settings.thin_component_min_length_px = 12
+    settings.thin_component_min_area_px = 20
+    settings.thin_component_min_aspect_ratio = 4.0
+    settings.thin_line_bridge_px = 2
+
+    mask = np.zeros((40, 80), dtype=bool)
+    mask[19:21, 10:28] = True
+    mask[19:21, 31:50] = True
+    rgba = np.zeros((40, 80, 4), dtype=np.uint8)
+    rgba[mask] = (80, 80, 80, 255)
+    rgba[19:21, 28:31] = (80, 80, 80, 255)
+    component = ComponentMask(
+        id="thin-gap",
+        mask=mask,
+        bbox=(10, 19, 40, 2),
+        area=int(np.count_nonzero(mask)),
+        score=0.99,
+    )
+
+    components = postprocess_component_masks(
+        raw_components=[component],
+        settings=settings,
+        image_shape=mask.shape,
+        rgba=rgba,
+    )
+
+    assert len(components) == 1
+    assert components[0].mask[19, 29]
+
+
+def test_postprocess_component_masks_recovers_missing_edge_pixels() -> None:
+    config = Image2PptxConfig()
+    settings = config.sam
+    settings.min_mask_area_px = 10
+    settings.edge_expand_px = 2
+    settings.edge_color_distance_thresh = 5.0
+
+    rgba = np.zeros((40, 40, 4), dtype=np.uint8)
+    rgba[10:20, 10:20] = (120, 180, 220, 255)
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[10:20, 10:18] = True
+    component = ComponentMask(
+        id="partial-cloud",
+        mask=mask,
+        bbox=(10, 10, 8, 10),
+        area=int(np.count_nonzero(mask)),
+        score=0.99,
+    )
+
+    components = postprocess_component_masks(
+        raw_components=[component],
+        settings=settings,
+        image_shape=mask.shape,
+        rgba=rgba,
+    )
+
+    assert len(components) == 1
+    assert components[0].mask[12, 18]
+    assert components[0].bbox[2] >= 9
 
 
 def test_build_text_mask_targets_text_pixels_instead_of_full_box() -> None:
@@ -233,6 +299,70 @@ def test_build_text_mask_targets_text_pixels_instead_of_full_box() -> None:
     assert text_mask[8, 10] == 0
     assert text_mask[31, 69] == 0
     assert np.count_nonzero(text_mask) <= 170
+
+
+def test_build_text_nodes_marks_centered_title_and_single_line() -> None:
+    rgba = np.full((120, 400, 4), 255, dtype=np.uint8)
+    image = Image.fromarray(rgba, mode="RGBA")
+    preprocessed = PreprocessResult(
+        source_path=Path("synthetic.png"),
+        image=image,
+        rgba=rgba,
+        segmented_image=image,
+        segmented_rgba=rgba,
+        original_size=image.size,
+        processed_size=image.size,
+    )
+    settings = Image2PptxConfig().ocr
+    box = OcrBox(
+        text="Centered Title",
+        score=0.99,
+        bbox=BoundingBox(x=80, y=10, width=240, height=36),
+        polygon=((80.0, 10.0), (320.0, 10.0), (320.0, 46.0), (80.0, 46.0)),
+    )
+
+    nodes = build_text_nodes(preprocessed, [box], settings)
+
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node.kind == "primitive"
+    assert node.text_align == "center"
+    assert node.single_line is True
+    assert node.bold is True
+
+
+def test_build_text_nodes_rasterizes_dense_small_text_clusters(tmp_path: Path) -> None:
+    rgba = np.full((120, 200, 4), 255, dtype=np.uint8)
+    rgba[20:32, 20:50] = (0, 0, 0, 255)
+    rgba[20:32, 60:90] = (0, 0, 0, 255)
+    rgba[40:52, 20:50] = (0, 0, 0, 255)
+    rgba[40:52, 60:90] = (0, 0, 0, 255)
+    image = Image.fromarray(rgba, mode="RGBA")
+    preprocessed = PreprocessResult(
+        source_path=tmp_path / "synthetic.png",
+        image=image,
+        rgba=rgba,
+        segmented_image=image,
+        segmented_rgba=rgba,
+        original_size=image.size,
+        processed_size=image.size,
+    )
+    settings = Image2PptxConfig().ocr
+    boxes = [
+        OcrBox(
+            text=f"T{index}",
+            score=0.99,
+            bbox=BoundingBox(x=float(x), y=float(y), width=30.0, height=12.0),
+            polygon=((float(x), float(y)), (float(x + 30), float(y)), (float(x + 30), float(y + 12)), (float(x), float(y + 12))),
+        )
+        for index, (x, y) in enumerate([(20, 20), (60, 20), (20, 40), (60, 40)], start=1)
+    ]
+
+    nodes = build_text_nodes(preprocessed, boxes, settings, tmp_path)
+
+    assert any(node.kind == "picture_asset" for node in nodes)
+    assert not any(getattr(node, "text", None) == "T1" for node in nodes)
+    assert (tmp_path / "text_assets" / "text_cluster_0.png").exists()
 
 
 def test_prepare_sam_input_inpaints_text_without_breaking_box_border() -> None:

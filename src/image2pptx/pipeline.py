@@ -45,7 +45,7 @@ def run_pipeline(
     preprocessed.segmented_image.save(artifacts_dir / "quantized.png")
 
     text_boxes = detect_text_boxes(preprocessed, config.ocr)
-    text_nodes = build_text_nodes(preprocessed, text_boxes)
+    text_nodes = build_text_nodes(preprocessed, text_boxes, config.ocr, artifacts_dir)
     text_mask = build_text_mask(preprocessed.rgba, text_boxes, config.ocr) if config.ocr.remove_text_from_residual else None
     if text_boxes:
         (artifacts_dir / "ocr_boxes.json").write_text(
@@ -77,6 +77,7 @@ def run_pipeline(
             raw_components=raw_components,
             settings=config.sam,
             image_shape=preprocessed.rgba.shape[:2],
+            rgba=preprocessed.rgba,
             text_mask=text_mask,
         )
         save_sam_debug_artifacts(

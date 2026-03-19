@@ -10,7 +10,7 @@ from .config import Image2PptxConfig
 from .detection import DetectedRegion, classify_region
 from .mask_postprocess import ComponentMask
 from .preprocess import PreprocessResult
-from .scene_graph import BoundingBox, FreeformNode, PictureAssetNode, Point, PrimitiveNode, SceneGraph, SvgAssetNode
+from .scene_graph import BoundingBox, FreeformNode, Node, PictureAssetNode, Point, PrimitiveNode, SceneGraph, SvgAssetNode
 
 try:
     import vtracer
@@ -23,7 +23,7 @@ def build_scene_graph(
     regions: list[DetectedRegion],
     config: Image2PptxConfig,
     artifacts_dir: Path,
-    text_nodes: list[PrimitiveNode] | None = None,
+    text_nodes: list[Node] | None = None,
     text_mask: np.ndarray | None = None,
 ) -> SceneGraph:
     svg_dir = artifacts_dir / "svg"
@@ -93,7 +93,7 @@ def build_scene_graph_from_components(
     components: list[ComponentMask],
     config: Image2PptxConfig,
     artifacts_dir: Path,
-    text_nodes: list[PrimitiveNode] | None = None,
+    text_nodes: list[Node] | None = None,
 ) -> SceneGraph:
     asset_dir = artifacts_dir / "component_assets"
     asset_dir.mkdir(parents=True, exist_ok=True)

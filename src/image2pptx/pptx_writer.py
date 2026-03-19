@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
 from pptx.util import Emu, Inches, Pt
 
@@ -156,15 +156,40 @@ class PptxWriter:
             return
         text_frame = shape.text_frame
         text_frame.clear()
-        text_frame.word_wrap = True
+        text_frame.word_wrap = not node.single_line
+        text_frame.vertical_anchor = MSO_VERTICAL_ANCHOR.TOP
+        text_frame.margin_left = Inches(0.04)
+        text_frame.margin_right = Inches(0.04)
+        text_frame.margin_top = Inches(0.01)
+        text_frame.margin_bottom = Inches(0.01)
         paragraph = text_frame.paragraphs[0]
-        paragraph.alignment = PP_ALIGN.CENTER
+        paragraph.alignment = self._paragraph_alignment(node.text_align)
+        paragraph.space_after = Pt(0)
+        paragraph.space_before = Pt(0)
         run = paragraph.add_run()
         run.text = node.text
         run.font.name = "Microsoft YaHei"
-        run.font.size = Pt(max(8.0, (node.font_size or node.bbox.height) / pixels_per_inch * 72.0))
+        run.font.bold = node.bold
+        run.font.size = Pt(self._fit_font_size(node, pixels_per_inch))
         color = node.text_color or (0, 0, 0, 255)
         run.font.color.rgb = RGBColor(*color[:3])
 
     def _px_to_emu(self, value: float, pixels_per_inch: float) -> int:
         return int(round((value / pixels_per_inch) * EMU_PER_INCH))
+
+    def _paragraph_alignment(self, text_align: str) -> PP_ALIGN:
+        if text_align == "center":
+            return PP_ALIGN.CENTER
+        if text_align == "right":
+            return PP_ALIGN.RIGHT
+        return PP_ALIGN.LEFT
+
+    def _fit_font_size(self, node: PrimitiveNode, pixels_per_inch: float) -> float:
+        base_size = max(8.0, (node.font_size or node.bbox.height) / pixels_per_inch * 72.0)
+        if not node.text or not node.single_line:
+            return base_size
+
+        usable_width_in = max(0.2, (node.bbox.width / pixels_per_inch) - 0.08)
+        approx_char_width_em = 0.56 if all(ord(char) < 128 for char in node.text) else 0.9
+        width_limited_size = usable_width_in * 72.0 / max(1.0, len(node.text) * approx_char_width_em)
+        return max(8.0, min(base_size, width_limited_size))
