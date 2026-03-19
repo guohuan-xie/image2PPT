@@ -45,6 +45,9 @@ class SamSettings(BaseModel):
     edge_expand_px: int = 2
     edge_color_distance_thresh: float = 32.0
     edge_expand_max_area_ratio: float = 1.6
+    text_inpaint_dilate_px: int = 3
+    text_inpaint_close_px: int = 2
+    text_inpaint_radius: int = 5
 
 
 class VectorizationSettings(BaseModel):
@@ -70,10 +73,16 @@ class OcrSettings(BaseModel):
     remove_text_from_residual: bool = True
     text_padding_px: int = 3
     max_text_boxes: int = 200
+    min_text_box_height_px: int = 8
+    min_text_box_width_px: int = 8
+    min_text_box_area_px: int = 80
+    min_editable_text_height_px: int = 20
     text_background_sample_px: int = 4
     text_mask_min_color_distance: float = 28.0
     text_mask_min_luminance_delta: float = 20.0
     text_mask_dilate_px: int = 1
+    text_mask_close_px: int = 1
+    text_mask_min_component_area_px: int = 10
     rasterize_dense_text: bool = True
     rasterize_text_height_px: int = 22
     rasterize_cluster_gap_px: int = 18

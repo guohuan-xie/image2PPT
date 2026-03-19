@@ -60,11 +60,19 @@ def detect_text_boxes(preprocessed: PreprocessResult, settings: OcrSettings) -> 
         max_y = min(float(preprocessed.processed_size[1]), float(np.max(points[:, 1])) + settings.text_padding_px)
         if max_x <= min_x or max_y <= min_y:
             continue
+        box_width = max_x - min_x
+        box_height = max_y - min_y
+        if (
+            box_width < settings.min_text_box_width_px
+            or box_height < settings.min_text_box_height_px
+            or (box_width * box_height) < settings.min_text_box_area_px
+        ):
+            continue
         boxes.append(
             OcrBox(
                 text=raw_text,
                 score=raw_score,
-                bbox=BoundingBox(x=min_x, y=min_y, width=max_x - min_x, height=max_y - min_y),
+                bbox=BoundingBox(x=min_x, y=min_y, width=box_width, height=box_height),
                 polygon=tuple((float(point[0]), float(point[1])) for point in points.tolist()),
             )
         )
@@ -90,6 +98,8 @@ def build_text_nodes(
     text_node_index = 0
     for index, box in enumerate(boxes):
         if index in excluded_indexes:
+            continue
+        if box.bbox.height < settings.min_editable_text_height_px:
             continue
         text_color = estimate_text_color(preprocessed.rgba, box.bbox)
         font_size = estimate_font_size(box)
@@ -292,6 +302,11 @@ def refine_text_mask(rgba: np.ndarray, box: OcrBox, settings: OcrSettings) -> np
     polygon_mask = polygon_to_local_mask(crop.shape[:2], box.polygon, x1, y1)
     if not np.any(polygon_mask):
         polygon_mask = np.ones(crop.shape[:2], dtype=np.uint8)
+    elif settings.text_mask_dilate_px > 0:
+        polygon_mask = dilate_mask(
+            polygon_mask,
+            max(settings.text_mask_dilate_px, adaptive_text_margin(box)),
+        )
 
     background_rgb = estimate_local_background_color(rgba, box, polygon_mask, x1, y1, x2, y2, settings)
     crop_rgb = crop[:, :, :3].astype(np.float32)
@@ -310,14 +325,48 @@ def refine_text_mask(rgba: np.ndarray, box: OcrBox, settings: OcrSettings) -> np
     if not np.any(candidate_mask):
         return None
 
-    if settings.text_mask_dilate_px > 0:
-        kernel_size = settings.text_mask_dilate_px * 2 + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        candidate_mask = cv2.dilate(candidate_mask.astype(np.uint8), kernel, iterations=1) > 0
+    candidate_mask = postprocess_text_candidate_mask(candidate_mask.astype(np.uint8), box, settings)
 
     mask = np.zeros(rgba.shape[:2], dtype=np.uint8)
     mask[y1:y2, x1:x2] = candidate_mask.astype(np.uint8)
     return mask
+
+
+def adaptive_text_margin(box: OcrBox) -> int:
+    return max(1, int(round(box.bbox.height * 0.12)))
+
+
+def dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    kernel_size = radius_px * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1)
+
+
+def postprocess_text_candidate_mask(mask: np.ndarray, box: OcrBox, settings: OcrSettings) -> np.ndarray:
+    processed = mask.astype(np.uint8)
+    dilation = max(settings.text_mask_dilate_px, adaptive_text_margin(box))
+    if dilation > 0:
+        processed = dilate_mask(processed, dilation)
+
+    close_px = max(settings.text_mask_close_px, dilation // 2)
+    if close_px > 0:
+        kernel_size = close_px * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel)
+
+    if settings.text_mask_min_component_area_px > 0:
+        processed = remove_small_components(processed, settings.text_mask_min_component_area_px)
+
+    return processed > 0
+
+
+def remove_small_components(mask: np.ndarray, min_area_px: int) -> np.ndarray:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    filtered = np.zeros_like(mask, dtype=np.uint8)
+    for label in range(1, num_labels):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= min_area_px:
+            filtered[labels == label] = 1
+    return filtered
 
 
 def polygon_to_local_mask(
